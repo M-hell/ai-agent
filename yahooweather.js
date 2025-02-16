@@ -18,7 +18,7 @@ const options = {
 
 try {
 	const response = await axios.request(options);
-	console.log(response.data);
+	console.log(response.data.forecasts[0].low);
 } catch (error) {
 	console.error(error);
 }

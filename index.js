@@ -1,29 +1,46 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { HfInference } from "@huggingface/inference";
+import axios from "axios";
 import readlineSync from 'readline-sync';
 import dotenv from 'dotenv';
 dotenv.config();
 
+// Weather API Function
+async function getWeatherDetails(city = '') {
+    const options = {
+        method: 'GET',
+        url: 'https://yahoo-weather5.p.rapidapi.com/weather',
+        params: {
+            location: city,
+            format: 'json',
+            u: 'f'
+        },
+        headers: {
+            'x-rapidapi-key': process.env.RAPID_API_KEY,
+            'x-rapidapi-host': 'yahoo-weather5.p.rapidapi.com'
+        }
+    };
 
-// Dummy weather function
-function getWeatherDetails(city = '') {
-    if (city.toLowerCase() === 'delhi') return '10C';
-    if (city.toLowerCase() === 'mumbai') return '20C';
-    if (city.toLowerCase() === 'bangalore') return '30C';
-    if (city.toLowerCase() === 'chennai') return '40C';
-    return "Weather data not available";
+    try {
+        const response = await axios.request(options);
+        const temperature = response.data.forecasts[0].low; // Extracts temperature
+        return `${temperature}C`; // Returns temperature as a string
+    } catch (error) {
+        console.error("Weather API Error:", error.message);
+        return "Error fetching weather data.";
+    }
 }
 
-const tools = { 
+const tools = {
     "getWeatherDetails": getWeatherDetails
 };
 
 const SYSTEM_PROMPT = `
-you are an Ai assistant with START, PLAN, ACTION, Observation, and Output state.
+you are an AI assistant with START, PLAN, ACTION, Observation, and Output states.
 wait for the user prompt and first plan using available tools.
 After planning, take actions with appropriate tools and wait for observation based on action.
 Once you get the observations, return the AI response based on START prompt and observations.
 
-strictly follow the json output format
+strictly follow the json output format as in examples
 
 Available tools:
 - function getWeatherDetails(city: string): string
@@ -41,105 +58,64 @@ START
 {"type":"output","output":"The sum of weather of delhi and mumbai is 30C"}
 `;
 
-// Initialize Google Gemini API client
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const client = new HfInference(process.env.HUGGING_FACE_API_KEY1);
+const messages = [{ role: "system", content: SYSTEM_PROMPT }];
 
-// Initialize messages array for maintaining conversation history
-let messages = [{ role: 'system', content: SYSTEM_PROMPT }];
+while (true) {
+    const query = readlineSync.question(">> ");
 
-async function getResponse() {
+    const userQuery = {
+        type: "user",
+        user: query,
+    };
+
+    messages.push({ role: 'user', content: JSON.stringify(userQuery) });
+
     while (true) {
-        const query = readlineSync.question("Enter your query (type 'exit' to stop): ");
-        
-        if (query.toLowerCase() === 'exit') {
-            console.log("Ending the conversation. Goodbye!");
-            break; // Break the loop if user wants to exit
-        }
-
-        const q = {
-            type: 'user',
-            user: query
-        };
-        
-        // Add user query to message history
-        messages.push({
-            role: "user",
-            content: JSON.stringify(q)
+        const chat = await client.chatCompletion({
+            model: "deepseek-ai/DeepSeek-R1",
+            messages: messages,
+            response_format: { type: "json_object" },
+            provider: "together",
+            max_tokens: 500,
         });
 
-        // Loop to process the response based on the system's actions
-        try {
-            // Generate content from Gemini API
-            const response = await genAI.getGenerativeModel({ model: "gemini-2.0-flash" }).generateContent(JSON.stringify(messages));
-            
-            // Log raw response text for debugging
-            console.log("Raw AI Response:", response.response.text());
+        let result = chat.choices[0].message.content;
 
-            // Clean up raw response to remove Markdown formatting
-            let respText = response.response.text();
-            respText = respText.replace(/```json|```/g, '').trim(); // Remove ```json and closing ```
+        // Remove unwanted sections if any
+        result = result.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 
-            if (!respText) {
-                console.log("Empty response received, continuing...");
-                continue; // Skip if the response is empty
-            }
+        // Extract JSON objects separately
+        const jsonMatches = result.match(/\{[\s\S]*?\}/g);
 
-            // Try parsing the response
-            const resp = JSON.parse(respText);
+        if (!jsonMatches) {
+            console.error("No valid JSON found in the AI response.");
+            break;
+        }
 
-            console.log("AI Response:", resp);
+        for (const jsonStr of jsonMatches) {
+            try {
+                const parsedJson = JSON.parse(jsonStr);
+                console.log("Parsed AI Response:", parsedJson);
 
-            // Add system response to message history
-            messages.push({
-                role: "system",
-                content: JSON.stringify(resp)
-            });
+                messages.push({ role: 'assistant', content: jsonStr });
 
-            // Handle the response based on the type
-            if (resp.type === 'output') {
-                console.log("AI Output:", resp.output);
-            } else if (resp.type === 'action') {
-                const { function: fn, input } = resp;
-                // Execute the function based on the response action
-                if (fn === 'getWeatherDetails') {
-                    const weather = tools.getWeatherDetails(input);  // Call the weather function
-                    messages.push({
-                        role: "system",
-                        content: JSON.stringify({
-                            type: "observation",
-                            observation: weather
-                        })
-                    });
+                if (parsedJson.type === "output") {
+                    console.log(`🤖: ${parsedJson.output}`);
+                    break;
+                } else if (parsedJson.type === "action") {
+                    const fn = tools[parsedJson.function];
+                    if (fn) {
+                        const observation = await fn(parsedJson.input);
+                        const obs = { type: "observation", observation: observation };
+                        messages.push({ role: 'developer', content: JSON.stringify(obs) });
+                    } else {
+                        console.error(`Error: Function ${parsedJson.function} not found.`);
+                    }
                 }
-            } else if (resp.type === 'plan') {
-                console.log("Plan generated: ", resp.plan);
-                // Extract the city from the plan
-                const city = resp.plan.split('for ')[1].toLowerCase();
-                // Trigger the action for getWeatherDetails
-                const weather = tools.getWeatherDetails(city);
-                messages.push({
-                    role: "system",
-                    content: JSON.stringify({
-                        type: "observation",
-                        observation: weather
-                    })
-                });
-
-                // Generate the final output
-                const outputResponse = await genAI.getGenerativeModel({ model: "gemini-2.0-flash" }).generateContent(JSON.stringify(messages));
-                let outputText = outputResponse.response.text();
-                outputText = outputText.replace(/```json|```/g, '').trim();
-                const output = JSON.parse(outputText);
-
-                if (output.type === 'output') {
-                    console.log("AI Output:", output.output);
-                }
+            } catch (error) {
+                console.error("Error parsing JSON:", error.message);
             }
-        } catch (error) {
-            console.error("Error:", error.message || error);
         }
     }
 }
-
-// Start the process
-getResponse();

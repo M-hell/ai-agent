@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 
-const client = new HfInference(process.env.HUGGING_FACE_API_KEY);
+const client = new HfInference(process.env.HUGGING_FACE_API_KEY1);
 
 const chatCompletion = await client.chatCompletion({
 	model: "deepseek-ai/DeepSeek-R1",
@@ -17,4 +17,10 @@ const chatCompletion = await client.chatCompletion({
 	max_tokens: 500,
 });
 
-console.log(chatCompletion.choices[0].message.content);
+let result=chatCompletion.choices[0].message.content;
+
+// Remove <think> section and everything inside it
+result = result.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+
+
+console.log("Cleaned AI Response:", result);
